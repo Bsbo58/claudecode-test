@@ -51,11 +51,17 @@ initLevel(n) → spawnZombies(n)  [or WIN if level > 3]
 
 Remote: `https://github.com/Bsbo58/claudecode-test` (branch `master`).
 
-After every meaningful change:
+**Commit and push after every meaningful unit of work** — do not batch multiple features into one commit or wait until the end of a session. The goal is that GitHub always reflects the latest working state so work is never lost and any change can be reverted cleanly.
+
+When to commit:
+- After completing a feature or bug fix
+- After any refactor that leaves the code in a working state
+- Before starting a risky or experimental change (checkpoint commit)
+
 ```bash
 git add <files>
 git commit -m "concise imperative message"
 git push
 ```
 
-Commit message style: imperative, present tense, lowercase subject (e.g. `add dash ability to shooter`, `fix diagonal speed normalisation`).
+Commit message style: imperative, present tense, lowercase subject (e.g. `add dash ability to shooter`, `fix diagonal speed normalisation`). Never use vague messages like `update`, `fix stuff`, or `WIP`.
