@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Yusuf's Last Stand</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: #0d0d1a;
+      font-family: 'Courier New', monospace;
+      color: #eee;
+      cursor: none;
+      user-select: none;
+    }
+    canvas {
+      display: block;
+      image-rendering: pixelated;
+      border: 2px solid #1e1e3a;
+      box-shadow: 0 0 40px rgba(0, 200, 255, 0.15);
+    }
+    #hint {
+      margin-top: 10px;
+      font-size: 0.75rem;
+      color: #444;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="800" height="600"></canvas>
+  <div id="hint">WASD MOVE &nbsp;|&nbsp; MOUSE AIM &nbsp;|&nbsp; HOLD LMB FIRE &nbsp;|&nbsp; R RESTART</div>
+
+  <script>
+  // ─────────────────────────────────────────────
+  //  CONSTANTS
+  // ─────────────────────────────────────────────
+  const W = 800, H = 600;
+  const PLAYER_SPEED   = 200;
+  const PLAYER_SIZE    = 18;
+  const PLAYER_MAX_HP  = 100;
+  const SHOOT_COOLDOWN = 0.25;
+
+  const BULLET_SPEED   = 400;
+  const BULLET_RADIUS  = 4;
+  const BULLET_LIFETIME = 2.0;
+
+  const ZOMBIE_SIZE    = 16;
+  const ZOMBIE_HP_MAX  = 3;
+  const ZOMBIE_DAMAGE  = 15;      // hp/s on contact
+  const ZOMBIE_SPEEDS  = [60, 80, 100];
+  const LEVEL_COUNTS   = [5, 10, 15];
+
+  const GRID = 40;
+  const TRANSITION_TIME = 2.5;
+
+  // ─────────────────────────────────────────────
+  //  CANVAS
+  // ─────────────────────────────────────────────
+  const canvas = document.getElementById('c');
+  const ctx    = canvas.getContext('2d');
+
+  // ─────────────────────────────────────────────
+  //  INPUT
+  // ─────────────────────────────────────────────
+  const keys  = { w:false, a:false, s:false, d:false };
+  const mouse = { x: W/2, y: H/2, down: false };
+  let audioCtx = null;
+
+  function ensureAudio() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+
+  document.addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (k in keys) keys[k] = true;
+    if (k === 'r') onRestart();
+  });
+  document.addEventListener('keyup', e => {
+    const k = e.key.toLowerCase();
+    if (k in keys) keys[k] = false;
+  });
+  canvas.addEventListener('mousemove', e => {
+    const r = canvas.getBoundingClientRect();
+    mouse.x = (e.clientX - r.left) * (W / r.width);
+    mouse.y = (e.clientY - r.top)  * (H / r.height);
+  });
+  canvas.addEventListener('mousedown', e => {
+    if (e.button === 0) { mouse.down = true; ensureAudio(); }
+  });
+  canvas.addEventListener('mouseup',   e => { if (e.button === 0) mouse.down = false; });
+  // keep mouse outside canvas from locking fire
+  document.addEventListener('mouseup', e => { if (e.button === 0) mouse.down = false; });
+
+  // ─────────────────────────────────────────────
+  //  AUDIO
+  // ─────────────────────────────────────────────
+  function playSound(type) {
+    if (!audioCtx) return;
+    const ac = audioCtx;
+    const now = ac.currentTime;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.connect(gain);
+    gain.connect(ac.destination);
+
+    switch (type) {
+      case 'shoot':
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(600, now);
+        osc.frequency.exponentialRampToValueAtTime(200, now + 0.08);
+        gain.gain.setValueAtTime(0.08, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+        osc.start(now); osc.stop(now + 0.08);
+        break;
+      case 'hit':
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(250, now);
+        osc.frequency.exponentialRampToValueAtTime(80, now + 0.1);
+        gain.gain.setValueAtTime(0.15, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+        osc.start(now); osc.stop(now + 0.1);
+        break;
+      case 'die':
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(300, now);
+        osc.frequency.exponentialRampToValueAtTime(30, now + 0.35);
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+        osc.start(now); osc.stop(now + 0.35);
+        break;
+      case 'levelup':
+        [440, 550, 660, 880].forEach((f, i) => {
+          const o2 = ac.createOscillator();
+          const g2 = ac.createGain();
+          o2.connect(g2); g2.connect(ac.destination);
+          o2.type = 'square';
+          const t = now + i * 0.1;
+          o2.frequency.setValueAtTime(f, t);
+          g2.gain.setValueAtTime(0.12, t);
+          g2.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+          o2.start(t); o2.stop(t + 0.18);
+        });
+        break;
+      case 'gameover':
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(220, now);
+        osc.frequency.exponentialRampToValueAtTime(55, now + 0.8);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+        osc.start(now); osc.stop(now + 0.8);
+        break;
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  GAME STATE
+  // ─────────────────────────────────────────────
+  let player, bullets, zombies, state;
+  let lastTime = null;
+
+  function initGame() {
+    player = {
+      x: W / 2, y: H / 2,
+      angle: 0,
+      hp: PLAYER_MAX_HP, maxHp: PLAYER_MAX_HP,
+      shootCooldown: 0,
+      score: 0,
+      invincible: 0
+    };
+    bullets  = [];
+    zombies  = [];
+    state    = { phase: 'PLAYING', level: 1, transitionTimer: 0 };
+    spawnZombies(1);
+  }
+
+  function initLevel(n) {
+    bullets = [];
+    zombies = [];
+    player.invincible = 1.5;
+    spawnZombies(n);
+    state.phase = 'PLAYING';
+  }
+
+  function spawnZombies(level) {
+    const count = LEVEL_COUNTS[level - 1];
+    for (let i = 0; i < count; i++) {
+      spawnOneZombie(level);
+    }
+  }
+
+  function spawnOneZombie(level) {
+    // pick a random edge
+    let x, y;
+    const edge = Math.floor(Math.random() * 4);
+    const margin = ZOMBIE_SIZE * 2;
+    if      (edge === 0) { x = Math.random() * W; y = -margin; }
+    else if (edge === 1) { x = Math.random() * W; y = H + margin; }
+    else if (edge === 2) { x = -margin;            y = Math.random() * H; }
+    else                 { x = W + margin;         y = Math.random() * H; }
+
+    zombies.push({ x, y, hp: ZOMBIE_HP_MAX, angle: 0, flashTimer: 0, dead: false, level });
+  }
+
+  // ─────────────────────────────────────────────
+  //  UPDATE
+  // ─────────────────────────────────────────────
+  function update(dt) {
+    if (state.phase === 'LEVEL_TRANSITION') {
+      state.transitionTimer -= dt;
+      if (state.transitionTimer <= 0) {
+        state.level++;
+        if (state.level > 3) {
+          state.phase = 'WIN';
+          playSound('levelup');
+        } else {
+          initLevel(state.level);
+          playSound('levelup');
+        }
+      }
+      return;
+    }
+    if (state.phase !== 'PLAYING') return;
+
+    updatePlayer(dt);
+    updateBullets(dt);
+    updateZombies(dt);
+    checkBulletZombieCollisions();
+    checkZombiePlayerCollisions(dt);
+    checkLevelComplete();
+  }
+
+  function updatePlayer(dt) {
+    // movement
+    let dx = 0, dy = 0;
+    if (keys.a) dx -= 1;
+    if (keys.d) dx += 1;
+    if (keys.w) dy -= 1;
+    if (keys.s) dy += 1;
+
+    // normalize diagonal
+    const len = Math.sqrt(dx*dx + dy*dy);
+    if (len > 0) { dx /= len; dy /= len; }
+
+    player.x = Math.max(PLAYER_SIZE, Math.min(W - PLAYER_SIZE, player.x + dx * PLAYER_SPEED * dt));
+    player.y = Math.max(PLAYER_SIZE, Math.min(H - PLAYER_SIZE, player.y + dy * PLAYER_SPEED * dt));
+
+    // aim angle
+    player.angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+
+    // shooting
+    player.shootCooldown -= dt;
+    if (mouse.down && player.shootCooldown <= 0) {
+      player.shootCooldown = SHOOT_COOLDOWN;
+      const bx = player.x + Math.cos(player.angle) * (PLAYER_SIZE + 6);
+      const by = player.y + Math.sin(player.angle) * (PLAYER_SIZE + 6);
+      bullets.push({
+        x: bx, y: by,
+        vx: Math.cos(player.angle) * BULLET_SPEED,
+        vy: Math.sin(player.angle) * BULLET_SPEED,
+        lifetime: BULLET_LIFETIME,
+        dead: false
+      });
+      playSound('shoot');
+    }
+
+    // invincibility frames
+    if (player.invincible > 0) player.invincible -= dt;
+  }
+
+  function updateBullets(dt) {
+    for (const b of bullets) {
+      if (b.dead) continue;
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.lifetime -= dt;
+      if (b.lifetime <= 0 || b.x < -20 || b.x > W+20 || b.y < -20 || b.y > H+20) {
+        b.dead = true;
+      }
+    }
+    bullets = bullets.filter(b => !b.dead);
+  }
+
+  function updateZombies(dt) {
+    for (const z of zombies) {
+      if (z.dead) continue;
+      const ang = Math.atan2(player.y - z.y, player.x - z.x);
+      const spd = ZOMBIE_SPEEDS[state.level - 1];
+      z.x += Math.cos(ang) * spd * dt;
+      z.y += Math.sin(ang) * spd * dt;
+      z.angle = ang;
+      if (z.flashTimer > 0) z.flashTimer -= dt;
+    }
+    zombies = zombies.filter(z => !z.dead);
+  }
+
+  function checkBulletZombieCollisions() {
+    for (const b of bullets) {
+      if (b.dead) continue;
+      for (const z of zombies) {
+        if (z.dead) continue;
+        // AABB: bullet circle vs zombie square
+        const halfZ = ZOMBIE_SIZE;
+        if (b.x + BULLET_RADIUS > z.x - halfZ &&
+            b.x - BULLET_RADIUS < z.x + halfZ &&
+            b.y + BULLET_RADIUS > z.y - halfZ &&
+            b.y - BULLET_RADIUS < z.y + halfZ) {
+          b.dead = true;
+          z.hp--;
+          z.flashTimer = 0.12;
+          if (z.hp <= 0) {
+            z.dead = true;
+            player.score += 100;
+            playSound('die');
+          } else {
+            playSound('hit');
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  function checkZombiePlayerCollisions(dt) {
+    if (player.invincible > 0) return;
+    for (const z of zombies) {
+      if (z.dead) continue;
+      const dx = z.x - player.x;
+      const dy = z.y - player.y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      if (dist < PLAYER_SIZE + ZOMBIE_SIZE) {
+        player.hp -= ZOMBIE_DAMAGE * dt;
+        if (player.hp <= 0) {
+          player.hp = 0;
+          state.phase = 'GAME_OVER';
+          playSound('gameover');
+        }
+      }
+    }
+  }
+
+  function checkLevelComplete() {
+    if (zombies.length === 0 && state.phase === 'PLAYING') {
+      if (state.level >= 3) {
+        state.phase = 'WIN';
+        playSound('levelup');
+      } else {
+        state.phase = 'LEVEL_TRANSITION';
+        state.transitionTimer = TRANSITION_TIME;
+        playSound('levelup');
+      }
+    }
+  }
+
+  function onRestart() {
+    if (state && (state.phase === 'WIN' || state.phase === 'GAME_OVER')) {
+      initGame();
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  DRAW
+  // ─────────────────────────────────────────────
+  function drawBackground() {
+    ctx.fillStyle = '#0d0d1a';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= W; x += GRID) {
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    for (let y = 0; y <= H; y += GRID) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+  }
+
+  function drawZombies() {
+    for (const z of zombies) {
+      if (z.dead) continue;
+      ctx.save();
+      ctx.translate(z.x, z.y);
+      // No rotation for zombies — they always face forward; rotate to player direction
+      ctx.rotate(z.angle - Math.PI / 2);
+
+      const s = ZOMBIE_SIZE;
+      // body
+      if (z.flashTimer > 0) {
+        ctx.fillStyle = '#ffffff';
+      } else {
+        ctx.fillStyle = '#22cc44';
+      }
+      ctx.fillRect(-s, -s, s*2, s*2);
+
+      // border
+      ctx.strokeStyle = '#0a5520';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-s, -s, s*2, s*2);
+
+      // X eyes
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 2;
+      const eo = 6;
+      // left eye X
+      ctx.beginPath(); ctx.moveTo(-eo-3, -4); ctx.lineTo(-eo+3, 2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-eo+3, -4); ctx.lineTo(-eo-3, 2); ctx.stroke();
+      // right eye X
+      ctx.beginPath(); ctx.moveTo(eo-3, -4); ctx.lineTo(eo+3, 2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(eo+3, -4); ctx.lineTo(eo-3, 2); ctx.stroke();
+
+      // fang mouth
+      ctx.strokeStyle = '#003300';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-6, 6);
+      ctx.lineTo(-3, 10);
+      ctx.lineTo(0, 6);
+      ctx.lineTo(3, 10);
+      ctx.lineTo(6, 6);
+      ctx.stroke();
+
+      ctx.restore();
+
+      // HP pips above zombie (drawn in screen space — after restore)
+      const pipW = 8, pipH = 4, pipGap = 2;
+      const totalW = ZOMBIE_HP_MAX * (pipW + pipGap) - pipGap;
+      const pipX = z.x - totalW / 2;
+      const pipY = z.y - ZOMBIE_SIZE - 10;
+      for (let i = 0; i < ZOMBIE_HP_MAX; i++) {
+        ctx.fillStyle = i < z.hp ? '#22cc44' : '#333';
+        ctx.fillRect(pipX + i * (pipW + pipGap), pipY, pipW, pipH);
+      }
+    }
+  }
+
+  function drawPlayer() {
+    const p = player;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.angle - Math.PI / 2);
+
+    const s = PLAYER_SIZE;
+
+    // blink when invincible
+    if (p.invincible > 0 && Math.floor(p.invincible * 8) % 2 === 0) {
+      ctx.restore();
+      return;
+    }
+
+    // body
+    ctx.fillStyle = '#00ccff';
+    ctx.fillRect(-s, -s, s*2, s*2);
+    ctx.strokeStyle = '#005577';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-s, -s, s*2, s*2);
+
+    // gun barrel
+    ctx.fillStyle = '#0088aa';
+    ctx.fillRect(-4, -s - 12, 8, 14);
+
+    // muzzle dot
+    ctx.fillStyle = '#ffff00';
+    ctx.beginPath();
+    ctx.arc(0, -s - 12, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+
+    // name label (no rotation)
+    ctx.fillStyle = '#00ffff';
+    ctx.font = 'bold 11px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('YUSUF', p.x, p.y - PLAYER_SIZE - 16);
+  }
+
+  function drawBullets() {
+    ctx.shadowColor = '#ffff00';
+    ctx.shadowBlur  = 10;
+    ctx.fillStyle   = '#ffe040';
+    for (const b of bullets) {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, BULLET_RADIUS, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+    ctx.shadowColor = 'transparent';
+  }
+
+  function drawHUD() {
+    const p = player;
+
+    // ── HP bar ──
+    const barX = 14, barY = 14, barW = 160, barH = 16;
+    ctx.fillStyle = '#111';
+    ctx.fillRect(barX, barY, barW, barH);
+    const hpRatio = Math.max(0, p.hp / p.maxHp);
+    let hpColor = '#22cc44';
+    if (hpRatio < 0.5) hpColor = '#ffaa00';
+    if (hpRatio < 0.25) hpColor = '#ee2222';
+    ctx.fillStyle = hpColor;
+    ctx.fillRect(barX, barY, barW * hpRatio, barH);
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX, barY, barW, barH);
+    ctx.fillStyle = '#eee';
+    ctx.font = '11px "Courier New", monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText(`HP  ${Math.ceil(p.hp)}`, barX + 4, barY + 12);
+
+    // ── Score ──
+    ctx.fillStyle = '#ffff88';
+    ctx.font = 'bold 14px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`SCORE  ${p.score}`, W / 2, 26);
+
+    // ── Level + Zombie count ──
+    ctx.fillStyle = '#aaeeff';
+    ctx.font = '13px "Courier New", monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(`LVL ${state.level}   ZOMBIES ${zombies.length}`, W - 14, 26);
+
+    // ── Crosshair ──
+    const mx = mouse.x, my = mouse.y;
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 1.5;
+    const cSize = 10, cGap = 4;
+    ctx.beginPath();
+    ctx.moveTo(mx - cSize - cGap, my); ctx.lineTo(mx - cGap, my);
+    ctx.moveTo(mx + cGap, my);         ctx.lineTo(mx + cSize + cGap, my);
+    ctx.moveTo(mx, my - cSize - cGap); ctx.lineTo(mx, my - cGap);
+    ctx.moveTo(mx, my + cGap);         ctx.lineTo(mx, my + cSize + cGap);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,80,80,0.7)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(mx, my, 3, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  function drawOverlay() {
+    if (state.phase === 'LEVEL_TRANSITION') {
+      const alpha = Math.min(1, state.transitionTimer / TRANSITION_TIME * 4);
+      ctx.fillStyle = `rgba(0,0,0,${0.65 * alpha})`;
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.fillStyle = `rgba(0,220,255,${alpha})`;
+      ctx.font = 'bold 52px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`LEVEL ${state.level} CLEAR`, W/2, H/2 - 20);
+
+      ctx.fillStyle = `rgba(200,200,200,${alpha})`;
+      ctx.font = '22px "Courier New", monospace';
+      ctx.fillText(`LEVEL ${state.level + 1} INCOMING`, W/2, H/2 + 30);
+    }
+
+    if (state.phase === 'WIN') {
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.fillStyle = '#00ffcc';
+      ctx.font = 'bold 48px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('YOU WIN!', W/2, H/2 - 60);
+
+      ctx.fillStyle = '#eee';
+      ctx.font = '20px "Courier New", monospace';
+      ctx.fillText('YUSUF SURVIVED ALL 3 LEVELS', W/2, H/2 - 10);
+
+      ctx.fillStyle = '#ffff88';
+      ctx.font = 'bold 24px "Courier New", monospace';
+      ctx.fillText(`FINAL SCORE:  ${player.score}`, W/2, H/2 + 40);
+
+      ctx.fillStyle = '#888';
+      ctx.font = '16px "Courier New", monospace';
+      ctx.fillText('PRESS  R  TO PLAY AGAIN', W/2, H/2 + 90);
+    }
+
+    if (state.phase === 'GAME_OVER') {
+      ctx.fillStyle = 'rgba(0,0,0,0.8)';
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.fillStyle = '#ee2222';
+      ctx.font = 'bold 56px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('GAME OVER', W/2, H/2 - 60);
+
+      ctx.fillStyle = '#cc8888';
+      ctx.font = '20px "Courier New", monospace';
+      ctx.fillText('YUSUF HAS FALLEN...', W/2, H/2 - 10);
+
+      ctx.fillStyle = '#ffff88';
+      ctx.font = 'bold 24px "Courier New", monospace';
+      ctx.fillText(`FINAL SCORE:  ${player.score}`, W/2, H/2 + 40);
+
+      ctx.fillStyle = '#888';
+      ctx.font = '16px "Courier New", monospace';
+      ctx.fillText('PRESS  R  TO TRY AGAIN', W/2, H/2 + 90);
+    }
+  }
+
+  // ─────────────────────────────────────────────
+  //  GAME LOOP
+  // ─────────────────────────────────────────────
+  function loop(ts) {
+    if (lastTime === null) lastTime = ts;
+    const dt = Math.min((ts - lastTime) / 1000, 0.05);
+    lastTime = ts;
+
+    update(dt);
+
+    drawBackground();
+    drawZombies();
+    drawPlayer();
+    drawBullets();
+    drawHUD();
+    drawOverlay();
+
+    requestAnimationFrame(loop);
+  }
+
+  // ─────────────────────────────────────────────
+  //  BOOT
+  // ─────────────────────────────────────────────
+  initGame();
+  requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
